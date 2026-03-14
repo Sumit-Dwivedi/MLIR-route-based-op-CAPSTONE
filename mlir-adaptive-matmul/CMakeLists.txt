@@ -51,9 +51,11 @@ set(ADAPTIVE_MATMUL_SOURCES
   src/generic_passes/GPUOffloadPass.cpp
   src/generic_passes/KernelFusionPass.cpp
   src/small_passes/SmallMatrixVectorPass.cpp
+  src/lowering/LowerToLLVMPass.cpp
+  src/jit/AdaptiveJITRunner.cpp
 )
 
-add_library(AdaptiveMatmul SHARED ${ADAPTIVE_MATMUL_SOURCES} ${ADAPTIVE_MATMUL_HEADERS})
+add_library(AdaptiveMatmul STATIC ${ADAPTIVE_MATMUL_SOURCES} ${ADAPTIVE_MATMUL_HEADERS})
 
 target_link_libraries(AdaptiveMatmul
   PUBLIC
@@ -63,13 +65,48 @@ target_link_libraries(AdaptiveMatmul
   MLIRControlFlowDialect
   MLIRFuncDialect
   MLIRMemRefDialect
+  MLIRSCFDialect
+  MLIRTensorDialect
   MLIRVectorDialect
   MLIRTilingInterface
   MLIRLinalgTransforms
+  MLIRLinalgUtils
+  MLIRBufferizationDialect
+  MLIRBufferizationTransforms
+  MLIRArithToLLVM
+  MLIRControlFlowToLLVM
+  MLIRFuncToLLVM
+  MLIRIndexToLLVM
+  MLIRMemRefToLLVM
+  MLIRSCFToControlFlow
+  MLIRVectorToLLVM
+  MLIRVectorToSCF
+  MLIRMathToLLVM
+  MLIRUBToLLVM
+  MLIRAffineToStandard
+  MLIRMemRefTransforms
+  MLIRReconcileUnrealizedCasts
+  MLIRConvertToLLVMPass
+  MLIRUBDialect
+  MLIRLLVMDialect
+  MLIRExecutionEngine
+  MLIRExecutionEngineUtils
+  MLIRLLVMToLLVMIRTranslation
+  MLIRTargetLLVMIRExport
+  MLIRBuiltinToLLVMIRTranslation
+  MLIRToLLVMIRTranslationRegistration
   MLIRPass
   MLIRTransforms
+  MLIRIR
   LLVMSupport
   LLVMCore
+  LLVMOrcJIT
+  LLVMOrcShared
+  LLVMOrcTargetProcess
+  LLVMX86CodeGen
+  LLVMX86AsmParser
+  LLVMX86Desc
+  LLVMX86Info
 )
 
 # Custom mlir-opt like tool
@@ -86,6 +123,8 @@ target_link_libraries(adaptive-opt
   MLIRControlFlowDialect
   MLIRFuncDialect
   MLIRMemRefDialect
+  MLIRSCFDialect
+  MLIRTensorDialect
   MLIRVectorDialect
   MLIRPass
   MLIRTransforms

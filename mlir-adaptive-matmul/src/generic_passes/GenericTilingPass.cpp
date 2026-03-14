@@ -1,55 +1,40 @@
 #include "AdaptiveMatmul/Passes.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
+#include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
-#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/Support/raw_ostream.h"
 
 namespace adaptive_matmul {
 
-class GenericTilingPattern : public mlir::OpRewritePattern<mlir::linalg::MatmulOp> {
-public:
-  using OpRewritePattern<mlir::linalg::MatmulOp>::OpRewritePattern;
+void GenericTilingPass::runOnOperation() {
+  mlir::ModuleOp module = getOperation();
 
-  mlir::LogicalResult matchAndRewrite(mlir::linalg::MatmulOp op, mlir::PatternRewriter &rewriter) const override {
-    auto strategyAttr = op->getAttrOfType<mlir::StringAttr>("optimization_strategy");
-    if (!strategyAttr || strategyAttr.getValue() != "square") {
-      return mlir::failure();
-    }
+  llvm::SmallVector<mlir::linalg::MatmulOp> targets;
+  module.walk([&](mlir::linalg::MatmulOp op) {
+    auto s = op->getAttrOfType<mlir::StringAttr>("optimization_strategy");
+    if (s && s.getValue() == "square" && !op->hasAttr("tiled"))
+      targets.push_back(op);
+  });
 
-    if (op->hasAttr("tiled")) {
-      return mlir::failure();
-    }
+  if (targets.empty())
+    return;
 
-    // Square tiling for square matrices (e.g., 32x32 tiles)
-    mlir::linalg::LinalgTilingOptions options;
-    options.setTileSizes({32, 32, 32});
+  mlir::IRRewriter rewriter(&getContext());
 
-    auto result = mlir::linalg::tileLinalgOp(rewriter, op, options);
-    if (mlir::failed(result)) {
-      return mlir::failure();
-    }
+  for (auto op : targets) {
+    mlir::linalg::LinalgTilingOptions opts;
+    opts.setTileSizes({32, 32, 32});
+
+    rewriter.setInsertionPoint(op);
+    auto result = mlir::linalg::tileLinalgOp(rewriter, op, opts);
+    if (mlir::failed(result))
+      continue;
 
     result->op->setAttr("tiled", rewriter.getUnitAttr());
-    rewriter.eraseOp(op);
-    return mlir::success();
+    rewriter.replaceOp(op, result->tensorResults);
   }
-};
 
-void GenericTilingPass::runOnOperation() {
-  bool has_square = false;
-  getOperation().walk([&](mlir::linalg::LinalgOp op) {
-    auto strategyAttr = op->getAttrOfType<mlir::StringAttr>("optimization_strategy");
-    if (strategyAttr && strategyAttr.getValue() == "square") has_square = true;
-  });
-  if (!has_square) return;
-  mlir::ModuleOp module = getOperation();
-  mlir::RewritePatternSet patterns(&getContext());
-  patterns.add<GenericTilingPattern>(&getContext());
-  
-  if (mlir::failed(mlir::applyPatternsGreedily(module, std::move(patterns)))) {
-    signalPassFailure();
-  }
   llvm::outs() << "Applied Generic Square Tiling\n";
 }
 

@@ -3,6 +3,11 @@
 
 #include "mlir/Pass/Pass.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
+#include "mlir/Dialect/UB/IR/UBOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 
 namespace adaptive_matmul {
 
@@ -75,6 +80,12 @@ public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SIMDVectorizationPass)
   llvm::StringRef getArgument() const final { return "simd-vectorization"; }
   llvm::StringRef getDescription() const final { return "SIMD specific vectorization."; }
+  void getDependentDialects(mlir::DialectRegistry &registry) const override {
+    registry.insert<mlir::arith::ArithDialect,
+                    mlir::memref::MemRefDialect,
+                    mlir::vector::VectorDialect,
+                    mlir::ub::UBDialect>();
+  }
   void runOnOperation() override;
 };
 
@@ -83,6 +94,25 @@ public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(KernelFusionPass)
   llvm::StringRef getArgument() const final { return "kernel-fusion"; }
   llvm::StringRef getDescription() const final { return "Fuses matmul with bias_add/relu."; }
+  void runOnOperation() override;
+};
+
+class LowerToLLVMPass : public mlir::PassWrapper<LowerToLLVMPass, mlir::OperationPass<mlir::ModuleOp>> {
+public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LowerToLLVMPass)
+  llvm::StringRef getArgument() const final { return "lower-to-llvm"; }
+  llvm::StringRef getDescription() const final { return "Lower vectorized IR through the full pipeline to LLVM dialect."; }
+  void runOnOperation() override;
+};
+
+class JITRunnerPass : public mlir::PassWrapper<JITRunnerPass, mlir::OperationPass<mlir::ModuleOp>> {
+public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(JITRunnerPass)
+  llvm::StringRef getArgument() const final { return "jit-run"; }
+  llvm::StringRef getDescription() const final { return "JIT-compile and benchmark the LLVM dialect module."; }
+  void getDependentDialects(mlir::DialectRegistry &registry) const override {
+    registry.insert<mlir::LLVM::LLVMDialect>();
+  }
   void runOnOperation() override;
 };
 

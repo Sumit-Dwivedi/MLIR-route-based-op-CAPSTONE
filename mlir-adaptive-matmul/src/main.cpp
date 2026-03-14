@@ -25,6 +25,8 @@ int main(int argc, char **argv) {
   mlir::PassRegistration<adaptive_matmul::SIMDVectorizationPass>();
   mlir::PassRegistration<adaptive_matmul::GPUOffloadPass>();
   mlir::PassRegistration<adaptive_matmul::KernelFusionPass>();
+  mlir::PassRegistration<adaptive_matmul::LowerToLLVMPass>();
+  mlir::PassRegistration<adaptive_matmul::JITRunnerPass>();
 
   mlir::DialectRegistry registry;
   mlir::registerAllDialects(registry);
