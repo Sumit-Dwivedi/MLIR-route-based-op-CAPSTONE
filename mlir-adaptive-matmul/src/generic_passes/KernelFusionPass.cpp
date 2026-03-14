@@ -1,80 +1,69 @@
-//===- KernelFusionPass.cpp - Linalg elementwise fusion -------------------===//
+//===- KernelFusionPass.cpp - Elementwise chain fusion --------------------===//
 //
-// Fuses linalg.matmul with consumer elementwise operations (ReLU, bias add)
-// using MLIR's populateElementwiseOpsFusionPatterns. Runs BEFORE tiling and
-// vectorization so the fused operation is tiled as a single micro-kernel.
+// Fuses elementwise consumer chains (bias_add → relu, etc.) into single
+// linalg.generic ops. Does NOT fuse elementwise ops into contractions —
+// that would incorrectly apply epilogue ops (ReLU, bias) per-reduction-step
+// instead of after the full reduction. Contraction+epilogue fusion is
+// handled by tile-and-fuse in the tiling passes.
 //
-// Fusion candidates:
-//   matmul -> linalg.generic (ReLU, bias_add, activation)
-//   matmul -> linalg.elemwise_binary (add)
-//   matmul -> linalg.elemwise_unary  (exp, tanh, etc.)
+// Strategy:
+//   1. Fuse elementwise → elementwise chains via MLIR's
+//      populateElementwiseOpsFusionPatterns (bias_add + relu → one generic).
+//
+// Runs BEFORE tiling so the fused elementwise epilogue is tiled as one unit.
 //
 //===----------------------------------------------------------------------===//
 
 #include "AdaptiveMatmul/Passes.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/Support/raw_ostream.h"
 
 namespace adaptive_matmul {
 
-/// Returns true if the producer-consumer edge should be fused.
-/// We fuse when the producer is a contraction (matmul) and the consumer
-/// is elementwise — this is the standard XLA/IREE epilogue fusion pattern.
-static bool controlFusionFn(mlir::OpOperand *fusedOperand) {
-  auto producer = fusedOperand->get().getDefiningOp<mlir::linalg::LinalgOp>();
-  if (!producer)
-    return false;
-
-  auto consumer =
-      mlir::dyn_cast<mlir::linalg::LinalgOp>(fusedOperand->getOwner());
-  if (!consumer)
-    return false;
-
-  // Fuse contraction (matmul) producers into elementwise consumers.
-  if (mlir::linalg::isaContractionOpInterface(producer) &&
-      mlir::linalg::isElementwise(consumer))
-    return true;
-
-  // Also fuse elementwise -> elementwise chains (e.g., bias_add -> relu).
-  if (mlir::linalg::isElementwise(producer) &&
-      mlir::linalg::isElementwise(consumer))
-    return true;
-
-  return false;
-}
-
 void KernelFusionPass::runOnOperation() {
   mlir::ModuleOp module = getOperation();
 
-  mlir::RewritePatternSet patterns(&getContext());
-  mlir::linalg::ControlFusionFn control = controlFusionFn;
-  mlir::linalg::populateElementwiseOpsFusionPatterns(patterns, control);
+  // ---- Elementwise → elementwise chain fusion ----
+  // Fuses chains like bias_add → relu into a single linalg.generic.
+  // Contractions (matmul) are left untouched — their epilogues will be
+  // fused into the tile loops by the tiling pass (tile-and-fuse).
+  {
+    mlir::RewritePatternSet patterns(&getContext());
+    mlir::linalg::ControlFusionFn control = [](mlir::OpOperand *) {
+      return true;
+    };
+    mlir::linalg::populateElementwiseOpsFusionPatterns(patterns, control);
 
-  mlir::GreedyRewriteConfig config;
-  config.setMaxIterations(10);
-  config.setUseTopDownTraversal(true);
+    mlir::GreedyRewriteConfig config;
+    config.setMaxIterations(10);
+    config.setUseTopDownTraversal(true);
 
-  if (mlir::failed(
-          mlir::applyPatternsGreedily(module, std::move(patterns), config))) {
-    llvm::errs() << "[KernelFusion] Pattern application failed.\n";
-    signalPassFailure();
-    return;
+    if (mlir::failed(
+            mlir::applyPatternsGreedily(module, std::move(patterns), config))) {
+      llvm::errs() << "[KernelFusion] Elementwise fusion failed.\n";
+      signalPassFailure();
+      return;
+    }
   }
 
-  // Count remaining ops to report fusion stats.
-  unsigned matmuls = 0, generics = 0;
+  // ---- Report ----
+  unsigned contractions = 0, elementwise = 0;
   module.walk([&](mlir::linalg::LinalgOp op) {
     if (mlir::linalg::isaContractionOpInterface(op))
-      ++matmuls;
+      ++contractions;
     else if (mlir::linalg::isElementwise(op))
-      ++generics;
+      ++elementwise;
   });
 
-  llvm::outs() << "[KernelFusion] Done. Remaining: " << matmuls
-               << " contraction(s), " << generics << " elementwise op(s).\n";
+  llvm::outs() << "[KernelFusion] Elementwise chain fusion done. Remaining: "
+               << contractions << " contraction(s), " << elementwise
+               << " elementwise epilogue(s).\n";
 }
 
 } // namespace adaptive_matmul

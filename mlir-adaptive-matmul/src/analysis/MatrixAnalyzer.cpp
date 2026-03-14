@@ -28,7 +28,7 @@ std::optional<MatrixInfo> MatrixAnalyzer::analyze(mlir::linalg::LinalgOp op) {
   if (info.M == mlir::ShapedType::kDynamic || info.N == mlir::ShapedType::kDynamic) {
       info.aspect_ratio = 1.0; // Assume square for dynamic shapes for now
   } else {
-      info.aspect_ratio = static_cast<double>(std::max(info.M, info.N)) / 
+      info.aspect_ratio = static_cast<double>(std::max(info.M, info.N)) /
                          std::max(static_cast<int64_t>(1), std::min(info.M, info.N));
   }
 

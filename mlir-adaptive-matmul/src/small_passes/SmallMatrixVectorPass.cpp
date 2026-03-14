@@ -13,13 +13,11 @@ public:
 
   mlir::LogicalResult matchAndRewrite(mlir::linalg::MatmulOp op, mlir::PatternRewriter &rewriter) const override {
     auto strategyAttr = op->getAttrOfType<mlir::StringAttr>("optimization_strategy");
-    if (!strategyAttr || strategyAttr.getValue() != "small") {
+    if (!strategyAttr || strategyAttr.getValue() != "small")
       return mlir::failure();
-    }
 
-    if (op->hasAttr("vectorized")) {
+    if (op->hasAttr("vectorized"))
       return mlir::failure();
-    }
 
     // Just mark as vectorized for now as a placeholder
     op->setAttr("vectorized", rewriter.getUnitAttr());

@@ -14,6 +14,10 @@
 
 int main(int argc, char **argv) {
   mlir::registerAllPasses();
+  // KernelFusion runs FIRST: fuses elementwise chains (bias+relu → one op).
+  // Contractions (matmul) remain as named ops — epilogue fusion happens
+  // via tile-and-fuse in the tiling passes.
+  mlir::PassRegistration<adaptive_matmul::KernelFusionPass>();
   mlir::PassRegistration<adaptive_matmul::RouterPass>();
   mlir::PassRegistration<adaptive_matmul::SkinnyTilingPass>();
   mlir::PassRegistration<adaptive_matmul::SkinnyVectorizationPass>();
@@ -24,7 +28,6 @@ int main(int argc, char **argv) {
   mlir::PassRegistration<adaptive_matmul::SquareBlockingPass>();
   mlir::PassRegistration<adaptive_matmul::SIMDVectorizationPass>();
   mlir::PassRegistration<adaptive_matmul::GPUOffloadPass>();
-  mlir::PassRegistration<adaptive_matmul::KernelFusionPass>();
   mlir::PassRegistration<adaptive_matmul::LowerToLLVMPass>();
   mlir::PassRegistration<adaptive_matmul::JITRunnerPass>();
 
