@@ -1,0 +1,12 @@
+mlir-adaptive-matmul/build/
+tests/python/venv/
+tests/python/tmp/
+results/*.json
+results/plots/*.png
+results/workload_cache.json
+kernel_training_data.json
+tuning_database.json
+__pycache__/
+*.so
+*.exe
+.DS_Store
