@@ -8,6 +8,8 @@
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 
 namespace adaptive_matmul {
 
@@ -72,6 +74,10 @@ public:
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GPUOffloadPass)
   llvm::StringRef getArgument() const final { return "gpu-offload"; }
   llvm::StringRef getDescription() const final { return "Offload matmul to GPU."; }
+  void getDependentDialects(mlir::DialectRegistry &registry) const override {
+    registry.insert<mlir::gpu::GPUDialect,
+                    mlir::scf::SCFDialect>();
+  }
   void runOnOperation() override;
 };
 

@@ -69,6 +69,8 @@ target_link_libraries(AdaptiveMatmul
   MLIRSCFTransforms
   MLIRTensorDialect
   MLIRVectorDialect
+  MLIRVectorTransforms
+  MLIRGPUDialect
   MLIRTilingInterface
   MLIRLinalgTransforms
   MLIRLinalgUtils

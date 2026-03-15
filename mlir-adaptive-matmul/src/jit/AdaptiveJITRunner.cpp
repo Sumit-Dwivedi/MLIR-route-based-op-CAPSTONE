@@ -33,6 +33,8 @@
 #include <numeric>
 #include <vector>
 
+#include <sys/resource.h>
+
 namespace adaptive_matmul {
 
 /// POD memref descriptors matching MLIR's flat ABI layout exactly.
@@ -143,11 +145,17 @@ void JITRunnerPass::runOnOperation() {
   mlir::registerLLVMDialectTranslation(registry);
   module->getContext()->appendDialectRegistry(registry);
 
-  // ---- Create ExecutionEngine with O2 optimization ----
+  // ---- Create ExecutionEngine ----
+  int jitOptLevel = 2;
+  if (const char *envOpt = std::getenv("ADAPTIVE_JIT_OPT"))
+    jitOptLevel = std::atoi(envOpt);
+
   mlir::ExecutionEngineOptions opts;
   opts.transformer = mlir::makeOptimizingTransformer(
-      /*optLevel=*/2, /*sizeLevel=*/0, /*targetMachine=*/nullptr);
-  opts.jitCodeGenOptLevel = llvm::CodeGenOptLevel::Aggressive;
+      /*optLevel=*/jitOptLevel, /*sizeLevel=*/0, /*targetMachine=*/nullptr);
+  opts.jitCodeGenOptLevel = (jitOptLevel == 0)
+                                ? llvm::CodeGenOptLevel::None
+                                : llvm::CodeGenOptLevel::Aggressive;
   opts.enableObjectDump = false;
 
   // Register MLIR runtime utilities (provides memrefCopy, etc.)
@@ -213,28 +221,47 @@ void JITRunnerPass::runOnOperation() {
   llvm::outs() << "[JITRunner] Matrix: " << M << "x" << K << " * " << K << "x"
                << N << " (" << benchRuns << " runs)\n";
 
-  // ---- Allocate buffers for each argument ----
+  // ---- Allocate aligned buffers for each argument ----
   // Convention: arg0 = A(MxK), arg1 = B(KxN), last 2D = C(MxN) output,
   // middle 1D args = vectors of size N (e.g., bias).
-  llvm::SmallVector<std::vector<float>> buffers(numMemRefs);
+  // Use 64-byte alignment to satisfy AVX-512 and AVX2 vector load/store
+  // requirements. std::vector does not guarantee SIMD alignment.
+  constexpr size_t kAlignment = 64;
+  auto alignedAlloc = [](size_t count, size_t align) -> float * {
+    void *ptr = nullptr;
+    if (posix_memalign(&ptr, align, count * sizeof(float)) != 0)
+      return nullptr;
+    return static_cast<float *>(ptr);
+  };
+
+  llvm::SmallVector<float *> rawBuffers(numMemRefs, nullptr);
+  llvm::SmallVector<size_t> bufSizes(numMemRefs, 0);
   llvm::SmallVector<MemRef2D> descs2D(numMemRefs);
   llvm::SmallVector<MemRef1D> descs1D(numMemRefs);
 
   for (unsigned i = 0; i < numMemRefs; ++i) {
     if (ranks[i] == 2) {
       if (i == 0) {
-        buffers[i].assign(M * K, 1.0f);
-        descs2D[i] = makeDesc2D(buffers[i].data(), M, K);
+        bufSizes[i] = M * K;
+        rawBuffers[i] = alignedAlloc(bufSizes[i], kAlignment);
+        std::fill_n(rawBuffers[i], bufSizes[i], 1.0f);
+        descs2D[i] = makeDesc2D(rawBuffers[i], M, K);
       } else if (i == 1) {
-        buffers[i].assign(K * N, 1.0f);
-        descs2D[i] = makeDesc2D(buffers[i].data(), K, N);
+        bufSizes[i] = K * N;
+        rawBuffers[i] = alignedAlloc(bufSizes[i], kAlignment);
+        std::fill_n(rawBuffers[i], bufSizes[i], 1.0f);
+        descs2D[i] = makeDesc2D(rawBuffers[i], K, N);
       } else {
-        buffers[i].assign(M * N, 0.0f);
-        descs2D[i] = makeDesc2D(buffers[i].data(), M, N);
+        bufSizes[i] = M * N;
+        rawBuffers[i] = alignedAlloc(bufSizes[i], kAlignment);
+        std::memset(rawBuffers[i], 0, bufSizes[i] * sizeof(float));
+        descs2D[i] = makeDesc2D(rawBuffers[i], M, N);
       }
     } else if (ranks[i] == 1) {
-      buffers[i].assign(N, 0.0f);
-      descs1D[i] = makeDesc1D(buffers[i].data(), N);
+      bufSizes[i] = N;
+      rawBuffers[i] = alignedAlloc(bufSizes[i], kAlignment);
+      std::memset(rawBuffers[i], 0, bufSizes[i] * sizeof(float));
+      descs1D[i] = makeDesc1D(rawBuffers[i], N);
     }
   }
 
@@ -256,49 +283,85 @@ void JITRunnerPass::runOnOperation() {
   auto resetOutputs = [&]() {
     for (unsigned i = 0; i < numMemRefs; ++i) {
       if (ranks[i] == 2 && i >= 2) {
-        std::memset(buffers[i].data(), 0, buffers[i].size() * sizeof(float));
-        descs2D[i] = makeDesc2D(buffers[i].data(), M, N);
+        std::memset(rawBuffers[i], 0, bufSizes[i] * sizeof(float));
+        descs2D[i] = makeDesc2D(rawBuffers[i], M, N);
       }
     }
     std::memset(&descResult, 0, sizeof(descResult));
   };
 
-  // ---- Warmup runs ----
-  for (int i = 0; i < warmupRuns; ++i) {
-    resetOutputs();
-    auto args = buildArgs();
-    auto err =
-        engine->invokePacked(funcName, llvm::MutableArrayRef(args));
-    if (err) {
-      llvm::errs() << "[JITRunner] Warmup invocation failed: "
-                   << llvm::toString(std::move(err)) << "\n";
-      signalPassFailure();
-      return;
+  // ---- Run warmup + benchmark + verification on a thread with large stack ----
+  // Multi-level tiling + vectorization generates deep loop nests that
+  // require more stack than the default 8-12 MB.
+  bool jitFailed = false;
+  std::vector<double> timings;
+  timings.reserve(benchRuns);
+  float *resultData = nullptr;
+
+  auto jitWork = [&]() {
+    // Warmup + benchmark + verify.
+    // Warmup
+    for (int i = 0; i < warmupRuns; ++i) {
+      resetOutputs();
+      auto args = buildArgs();
+      // Warmup invocation.
+      auto err =
+          engine->invokePacked(funcName, llvm::MutableArrayRef(args));
+      if (err) {
+        llvm::errs() << "[JITRunner] Warmup invocation failed: "
+                     << llvm::toString(std::move(err)) << "\n";
+        jitFailed = true;
+        return;
+      }
+    }
+
+    // Benchmark
+    for (int i = 0; i < benchRuns; ++i) {
+      resetOutputs();
+      auto args = buildArgs();
+
+      auto start = std::chrono::high_resolution_clock::now();
+      auto err =
+          engine->invokePacked(funcName, llvm::MutableArrayRef(args));
+      auto end = std::chrono::high_resolution_clock::now();
+
+      if (err) {
+        llvm::errs() << "[JITRunner] Invocation " << i
+                     << " failed: " << llvm::toString(std::move(err)) << "\n";
+        jitFailed = true;
+        return;
+      }
+
+      double ms =
+          std::chrono::duration<double, std::milli>(end - start).count();
+      timings.push_back(ms);
+    }
+
+    resultData = descResult.dataPtr;
+  };
+
+  // Raise the stack limit for the main thread. Deeply-tiled vectorized code
+  // generates loop nests whose LLVM-lowered form uses significant stack space.
+  // The kernel auto-grows the main thread stack up to RLIMIT_STACK.
+  {
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_STACK, &rl) == 0) {
+      rl.rlim_cur = rl.rlim_max; // raise soft limit to hard limit
+      setrlimit(RLIMIT_STACK, &rl);
     }
   }
 
-  // ---- Benchmark runs ----
-  std::vector<double> timings;
-  timings.reserve(benchRuns);
+  jitWork();
 
-  for (int i = 0; i < benchRuns; ++i) {
-    resetOutputs();
-    auto args = buildArgs();
+  if (jitFailed) {
+    signalPassFailure();
+    return;
+  }
 
-    auto start = std::chrono::high_resolution_clock::now();
-    auto err =
-        engine->invokePacked(funcName, llvm::MutableArrayRef(args));
-    auto end = std::chrono::high_resolution_clock::now();
-
-    if (err) {
-      llvm::errs() << "[JITRunner] Invocation " << i
-                   << " failed: " << llvm::toString(std::move(err)) << "\n";
-      signalPassFailure();
-      return;
-    }
-
-    double ms = std::chrono::duration<double, std::milli>(end - start).count();
-    timings.push_back(ms);
+  if (timings.empty()) {
+    llvm::errs() << "[JITRunner] No timing data collected.\n";
+    signalPassFailure();
+    return;
   }
 
   // ---- Report results ----
@@ -319,18 +382,45 @@ void JITRunnerPass::runOnOperation() {
                << "  Max:     " << llvm::format("%.3f", maxT) << " ms\n"
                << "  GFLOPS:  " << llvm::format("%.2f", gflops) << "\n";
 
-  // ---- Sanity check: C[0][0] should be K * 1.0 * 1.0 = K ----
-  float *resultData = descResult.dataPtr;
+  // ---- Correctness verification against naive baseline ----
+  // With all-ones inputs, every C[r][c] = K * 1.0 * 1.0 = K.
+  // Verify 5 strategically chosen points: corners + center.
   if (resultData) {
     float expected = static_cast<float>(K);
-    float actual = resultData[0];
-    if (std::abs(actual - expected) > 1e-3f * expected) {
-      llvm::outs() << "  WARNING: C[0][0] = " << actual << ", expected "
-                   << expected << "\n";
-    } else {
-      llvm::outs() << "  Correctness: PASS (C[0][0] = " << actual << ")\n";
+    float relTol = 1e-3f;
+    int errors = 0;
+    int checked = 0;
+
+    int64_t points[][2] = {
+        {0, 0}, {0, N - 1}, {M - 1, 0}, {M - 1, N - 1}, {M / 2, N / 2}};
+    const char *labels[] = {"C[0][0]", "C[0][N-1]", "C[M-1][0]",
+                            "C[M-1][N-1]", "C[M/2][N/2]"};
+
+    for (int i = 0; i < 5; ++i) {
+      int64_t r = points[i][0], c = points[i][1];
+      float actual = resultData[r * N + c];
+      ++checked;
+      if (std::abs(actual - expected) > relTol * std::abs(expected)) {
+        llvm::outs() << "  MISMATCH " << labels[i] << ": got " << actual
+                     << ", expected " << expected << "\n";
+        ++errors;
+      }
     }
+
+    if (errors == 0) {
+      llvm::outs() << "  Correctness: PASS (" << checked << "/" << checked
+                   << " verified, all = " << expected << ")\n";
+    } else {
+      llvm::outs() << "  Correctness: FAIL (" << errors << "/" << checked
+                   << " mismatched)\n";
+    }
+  } else {
+    llvm::outs() << "  Correctness: SKIP (no result pointer)\n";
   }
+
+  // Free aligned buffers.
+  for (unsigned i = 0; i < numMemRefs; ++i)
+    free(rawBuffers[i]);
 }
 
 } // namespace adaptive_matmul

@@ -1,10 +1,13 @@
 //===- SquareBlockingPass.cpp - Cache-aware blocking for square matrices --===//
 //
-// Two-level blocking strategy for near-square matrices:
+// Three-level blocking strategy for near-square matrices:
 //
-//   Level 0 (L2 blocking):  Tile M, N, K into blocks that fit in L2 cache.
-//   Level 1 (Register tile): Tile M, N to small MR x NR micro-tiles sized
+//   Level 0 (L2 blocking):  Tile M, N into blocks that fit in L2 cache.
+//   Level 1 (L1 K-tile):    Tile K into strips that keep A/B slices in L1.
+//   Level 2 (Register tile): Tile M, N to small MR x NR micro-tiles sized
 //                            for SIMD register files.
+//
+// Loop nesting: scf.for(M,N L2) → scf.for(K L1) → scf.for(M,N reg)
 //
 // When a contraction has an elementwise epilogue consumer (relu, bias+relu),
 // tile-and-fuse is used: we tile the epilogue on M,N and fuse the contraction
@@ -35,7 +38,7 @@ namespace adaptive_matmul {
 // ---------------------------------------------------------------------------
 struct BlockingSizes {
   int64_t l2M, l2N, l1K;
-  int64_t regM, regN;
+  int64_t regM, regN, regK;
 };
 
 static BlockingSizes computeBlockingSizes(const HardwareFeatures &hw) {
@@ -48,6 +51,9 @@ static BlockingSizes computeBlockingSizes(const HardwareFeatures &hw) {
     bs.regM = 8;  bs.regN = 8;
   }
   bs.l1K = 64;
+  // Register-level K tile: match the SIMD vector length to produce
+  // compact vector<MR x NR x regK> that lower cleanly to LLVM.
+  bs.regK = hw.has_avx512 ? 16 : 8;
 
   if (hw.cache_size_kb < 4096) {
     bs.l2M = std::max<int64_t>(32, bs.l2M / 2);
@@ -164,8 +170,9 @@ void SquareBlockingPass::runOnOperation() {
       }
 
       // ---- Regular tiling (no epilogue or tile-and-fuse failed) ----
+      // Tile only M,N at L2 level; K is tiled separately in Level 1.
       mlir::linalg::LinalgTilingOptions opts;
-      opts.setTileSizes({tM, tN, tK});
+      opts.setTileSizes({tM, tN, (int64_t)0});
 
       rewriter.setInsertionPoint(op);
       auto result = mlir::linalg::tileLinalgOp(rewriter, op, opts);
@@ -178,13 +185,69 @@ void SquareBlockingPass::runOnOperation() {
     }
   }
 
-  // --- Level 1: Register tiling ---
+  // --- Level 1: L1 K-dimension tiling ---
+  // Tile the K (reduction) dimension so that A and B slices fit in L1 cache.
+  // This creates: scf.for(M,N L2) → scf.for(K L1) → inner matmul(M_l2, N_l2, K_l1)
   {
     llvm::SmallVector<mlir::linalg::LinalgOp> targets;
     module.walk([&](mlir::linalg::LinalgOp op) {
       auto s = op->getAttrOfType<mlir::StringAttr>("optimization_strategy");
       if (s && s.getValue() == "square" &&
           op->hasAttr("square_l2_blocked") &&
+          !op->hasAttr("square_k_tiled"))
+        targets.push_back(op);
+    });
+
+    mlir::IRRewriter rewriter(&getContext());
+
+    for (auto op : targets) {
+      auto shapes = op.getStaticLoopRanges();
+      if (shapes.size() < 3) {
+        op->setAttr("square_k_tiled", rewriter.getUnitAttr());
+        continue;
+      }
+
+      int64_t K = shapes[2];
+      if (K == mlir::ShapedType::kDynamic || K <= bs.l1K) {
+        // K already fits in L1 or is dynamic — skip K tiling.
+        op->setAttr("square_k_tiled", rewriter.getUnitAttr());
+        continue;
+      }
+
+      int64_t tK = std::min(bs.l1K, K);
+
+      // Tile only K: {0, 0, tK} — M,N are already tiled at L2 level.
+      mlir::linalg::LinalgTilingOptions opts;
+      opts.setTileSizes({(int64_t)0, (int64_t)0, tK});
+
+      rewriter.setInsertionPoint(op);
+      auto result = mlir::linalg::tileLinalgOp(rewriter, op, opts);
+      if (mlir::failed(result)) {
+        op->setAttr("square_k_tiled", rewriter.getUnitAttr());
+        continue;
+      }
+
+      auto strategy = op->getAttrOfType<mlir::StringAttr>("optimization_strategy");
+      result->op->setAttr("optimization_strategy", strategy);
+      result->op->setAttr("square_l2_blocked", rewriter.getUnitAttr());
+      result->op->setAttr("square_k_tiled", rewriter.getUnitAttr());
+
+      // Propagate datatype attribute if present.
+      if (auto dt = op->getAttrOfType<mlir::StringAttr>("adaptive.datatype"))
+        result->op->setAttr("adaptive.datatype", dt);
+
+      rewriter.replaceOp(op, result->tensorResults);
+    }
+  }
+
+  // --- Level 2: Register tiling ---
+  {
+    llvm::SmallVector<mlir::linalg::LinalgOp> targets;
+    module.walk([&](mlir::linalg::LinalgOp op) {
+      auto s = op->getAttrOfType<mlir::StringAttr>("optimization_strategy");
+      if (s && s.getValue() == "square" &&
+          op->hasAttr("square_l2_blocked") &&
+          op->hasAttr("square_k_tiled") &&
           !op->hasAttr("square_reg_tiled"))
         targets.push_back(op);
     });
@@ -204,8 +267,12 @@ void SquareBlockingPass::runOnOperation() {
 
       int64_t tM = std::min(bs.regM, M);
       int64_t tN = std::min(bs.regN, N);
-      int64_t tK = std::min(bs.l1K, K > 0 ? K : bs.l1K);
+      int64_t tK = std::min(bs.regK, K > 0 ? K : bs.regK);
 
+      // Tile M, N, and K for register-level micro-kernels.
+      // K is tiled to regK (e.g., 8) so the vectorizer creates
+      // vector<MR x NR x regK> which fits in registers without
+      // blowing the stack.
       mlir::linalg::LinalgTilingOptions opts;
       opts.setTileSizes({tM, tN, tK});
 
@@ -221,8 +288,8 @@ void SquareBlockingPass::runOnOperation() {
     }
   }
 
-  llvm::outs() << "[SquareBlocking] Two-level blocking complete "
-                  "(L2 + register).\n";
+  llvm::outs() << "[SquareBlocking] Three-level blocking complete "
+                  "(L2 + L1-K + register).\n";
 }
 
 } // namespace adaptive_matmul

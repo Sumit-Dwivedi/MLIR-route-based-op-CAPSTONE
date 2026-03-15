@@ -70,7 +70,30 @@ void SIMDVectorizationPass::runOnOperation() {
         K == mlir::ShapedType::kDynamic)
       continue;
 
+    // Skip strategies that have their own vectorization or are GPU-targeted.
+    if (auto s = op->getAttrOfType<mlir::StringAttr>("optimization_strategy")) {
+      llvm::StringRef sv = s.getValue();
+      if (sv == "small" || sv == "gpu")
+        continue;
+    }
+
+    // Determine vector tile scaling from datatype attribute.
+    // INT8 inputs pack 4x more elements per SIMD register than f32.
+    int64_t vecScale = 1;
+    if (auto dtAttr =
+            op->getAttrOfType<mlir::StringAttr>("adaptive.datatype")) {
+      if (dtAttr.getValue() == "int8")
+        vecScale = 4;
+    }
+
     llvm::SmallVector<int64_t> vecSizes(shapes.begin(), shapes.end());
+    // Scale the innermost dimension (K / reduction) by the datatype factor
+    // to saturate integer SIMD registers (e.g., 64 i8 vs 16 f32 per 512-bit).
+    if (vecScale > 1 && vecSizes.size() >= 3) {
+      vecSizes[2] = std::min(vecSizes[2] * vecScale, K);
+      llvm::outs() << "[SIMDVectorization] INT8 mode: K vector tile "
+                   << shapes[2] << " -> " << vecSizes[2] << "\n";
+    }
     llvm::SmallVector<bool> scalableDims(vecSizes.size(), false);
 
     // Match the transform dialect's codepath exactly:

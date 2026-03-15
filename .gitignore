@@ -1,12 +1,53 @@
-mlir-adaptive-matmul/build/
-tests/python/venv/
-tests/python/tmp/
+# Build directories
+build/
+out/
+cmake-build-*/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Compiled objects and binaries
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+adaptive-opt
+
+# Python virtual environments
+compiler-env/
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.cproject
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Core dumps
+core
+core.*
+
+# Project-specific
 results/*.json
 results/plots/*.png
 results/workload_cache.json
 kernel_training_data.json
 tuning_database.json
-__pycache__/
-*.so
-*.exe
-.DS_Store
+tests/python/tmp/
+./docs/

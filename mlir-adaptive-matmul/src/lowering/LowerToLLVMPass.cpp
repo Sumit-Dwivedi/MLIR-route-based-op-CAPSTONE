@@ -38,6 +38,9 @@
 #include "mlir/Conversion/VectorToLLVM/ConvertVectorToLLVMPass.h"
 #include "mlir/Conversion/VectorToSCF/VectorToSCF.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
+#include "mlir/Dialect/Vector/Transforms/Passes.h"
+#include "mlir/Dialect/Vector/Transforms/LoweringPatterns.h"
+#include "mlir/Dialect/Vector/Transforms/VectorTransforms.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
@@ -59,7 +62,16 @@ void LowerToLLVMPass::runOnOperation() {
   pm.addPass(mlir::createCanonicalizerPass());
   pm.addPass(mlir::createCSEPass());
 
-  // ---- Phase 2: High-level dialect lowering ----
+  // ---- Phase 2: Vector dimension lowering (2D/3D → 1D) ----
+  // Lower multi_reduction and contract before VectorToSCF/VectorToLLVM,
+  // because LLVM IR does not support multi-dimensional vectors.
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::vector::createLowerVectorMultiReductionPass(
+          mlir::vector::VectorMultiReductionLowering::InnerParallel));
+  pm.addPass(mlir::createCanonicalizerPass());
+  pm.addPass(mlir::createCSEPass());
+
+  // ---- Phase 3: High-level dialect lowering ----
   pm.addNestedPass<mlir::func::FuncOp>(mlir::createConvertVectorToSCFPass());
   pm.addNestedPass<mlir::func::FuncOp>(mlir::createConvertLinalgToLoopsPass());
   pm.addPass(mlir::createLowerAffinePass());
@@ -67,7 +79,7 @@ void LowerToLLVMPass::runOnOperation() {
   pm.addPass(mlir::createCanonicalizerPass());
   pm.addPass(mlir::createCSEPass());
 
-  // ---- Phase 3: Dialect → LLVM conversions ----
+  // ---- Phase 4: Dialect → LLVM conversions ----
   pm.addPass(mlir::createConvertVectorToLLVMPass());
   pm.addNestedPass<mlir::func::FuncOp>(mlir::createConvertMathToLLVMPass());
   pm.addPass(mlir::memref::createExpandStridedMetadataPass());

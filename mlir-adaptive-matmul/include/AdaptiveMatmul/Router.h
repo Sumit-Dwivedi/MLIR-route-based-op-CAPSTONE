@@ -3,6 +3,10 @@
 
 #include "mlir/Pass/Pass.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include <memory>
 
 namespace adaptive_matmul {
@@ -13,6 +17,13 @@ public:
 
   llvm::StringRef getArgument() const final { return "adaptive-router"; }
   llvm::StringRef getDescription() const final { return "Routes matrix multiplications to specialized pipelines."; }
+
+  void getDependentDialects(mlir::DialectRegistry &registry) const override {
+    registry.insert<mlir::scf::SCFDialect,
+                    mlir::arith::ArithDialect,
+                    mlir::tensor::TensorDialect,
+                    mlir::memref::MemRefDialect>();
+  }
 
   void runOnOperation() override;
 };
