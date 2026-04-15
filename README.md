@@ -17,6 +17,17 @@ The **Adaptive MLIR MatMul Framework** is designed to solve the "one size fits a
 
 ---
 
+## 🔥 Why This Project? (The "Adaptive Edge")
+
+Unlike general-purpose libraries (TensorFlow/XLA, PyTorch Inductor) that use fixed heuristics or vendor black-boxes (cuBLAS, MKL), this framework functions as a **precision optimization tool**:
+
+1.  **Shape-Aware Routing:** Instead of a "one-size-fits-all" tiling, it selects specialized strategies for **Skinny**, **Square**, or **Small** matrices to maximize cache utilization.
+2.  **AOT Polyhedral Fallback:** For **Dynamic Shapes**, it generates compile-time multi-versioned code with runtime dispatch (`scf.if`), providing optimized vectorized paths without the overhead of runtime recompilation.
+3.  **Datatype-Aware Scaling:** Automatically scales vectorization factors (e.g., **4x scaling for INT8**) to saturate hardware-specific instructions (AVX-512 VNNI).
+4.  **Standalone & Transparent:** Provides production-grade optimizations (3-level blocking, fusion, SIMD) in a lightweight standalone tool, making it ideal for specialized performance tuning and research.
+
+---
+
 ## 👥 Target Audience
 
 *   **Compiler Engineers:** Exploring MLIR-based codegen and transformation pipelines.
