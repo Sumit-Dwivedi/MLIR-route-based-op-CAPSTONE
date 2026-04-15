@@ -44,10 +44,12 @@ core
 core.*
 
 # Project-specific
+results/
 results/*.json
 results/plots/*.png
 results/workload_cache.json
 kernel_training_data.json
 tuning_database.json
 tests/python/tmp/
-./docs/
+docs/
+.claude/

@@ -1,3 +1,3 @@
--4.496117e-01 gpu_offload_test.mlir
--4.523394e-01 quantized_matmul_test.mlir
-4.481680e-01 router_dynamic_dispatch.mlir
+-1.002660e-01 gpu_offload_test.mlir
+-1.022298e-01 quantized_matmul_test.mlir
+-1.002831e-01 router_dynamic_dispatch.mlir
