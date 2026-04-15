@@ -53,3 +53,4 @@ tuning_database.json
 tests/python/tmp/
 docs/
 .claude/
+claude.md
